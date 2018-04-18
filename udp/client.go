@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
-	"golang.org/x/net/dns/dnsmessage"
 	"net"
+	"os"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
 )
 
-func CheckError(err error) {
+func checkError(err error) {
 	if err != nil {
 		fmt.Println("Error: ", err)
 	}
@@ -22,33 +25,54 @@ func mustNewName(name string) dnsmessage.Name {
 }
 
 func main() {
-	ServerAddr, err := net.ResolveUDPAddr("udp", "LOCAL_IP:11001")
-	CheckError(err)
+	localAddr, err := net.ResolveUDPAddr("udp", os.Getenv("DNS_LOCAL")+":11001")
+	checkError(err)
 
-	Conn, err := net.ListenUDP("udp", ServerAddr)
-	CheckError(err)
-	go dns_reader(Conn)
-	go dns_writer(Conn)
+	Conn, err := net.ListenUDP("udp", localAddr)
+	Conn.SetReadBuffer(1000000000000)
+	checkError(err)
+	go dnsReader(Conn)
+	go dnsWriter(Conn)
 
 	defer Conn.Close()
-	time.Sleep(time.Second * 1)
+	time.Sleep(time.Second * 20)
 }
-func dns_reader(conn *net.UDPConn) {
+func dnsReader(conn *net.UDPConn) {
 	for {
-		buf := make([]byte, 1024)
+		buf := make([]byte, 4000)
 		//on MAC, sleep is needed, since ReadFromUDP is non-blocking
 		//time.Sleep(time.Millisecond * 450)
-		n, addr, err := conn.ReadFromUDP(buf)
+		//n, addr, err := conn.ReadFromUDP(buf)
+		_, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			fmt.Println("From Reader", err)
 		}
+		//fmt.Println("Received ", n, "bytes from ", addr)
 		var msg dnsmessage.Message
 		err = msg.Unpack(buf)
-		fmt.Printf("DNS Reader : %v\n", msg)
-		//return
+		checkError(err)
+		fmt.Printf("\n"+time.Now().Format("15:04:05.000000000")+" : ")
+		if msg.Header.RCode == dnsmessage.RCodeSuccess {
+			//fmt.Printf("%+s %+v", msg.Answers[0].Header.Name, msg.Answers[0].Body)
+			fmt.Printf("%+v", msg)
+			continue
+		} else if msg.Header.RCode == dnsmessage.RCodeNameError {
+
+			fmt.Printf("%+s : RCodeNameError", msg.Questions[0].Name)
+			continue
+		} else {
+			fmt.Printf("%+s : RCode = %d", msg.Questions[0].Name, msg.Header.RCode)
+			continue
+		}
+		fmt.Printf("\n\nDNS Reader : %v \n%T\n%+v \n\n%s\n", msg, msg.Answers[0].Body, msg.Answers[0].Body, msg.Answers[0].Header.Name)
+		soa := msg.Answers[0].Body
+		//soa{NS, MBox, Serial, Refresh, Retry, Expire, MinTTL} = &dnsmessage.SOAResource{msg.Answers[0].Body}
+		fmt.Printf("soa %%T = %T\nsoa %%v = %+v\nsoa %%d = %d", soa, soa, soa)
+		return
+
 		var p dnsmessage.Parser
 		if _, err := p.Start(buf); err != nil {
-			CheckError(err)
+			checkError(err)
 			//panic(err)
 		}
 		for {
@@ -105,30 +129,41 @@ func dns_reader(conn *net.UDPConn) {
 		}
 
 		fmt.Printf("Found A/AAAA records for name %v\n", gotIPs)
-		fmt.Println("Received ", string(buf[0:n]), " from ", addr, gotIPs)
+		//fmt.Println("Received ", string(buf[0:n]), " from ", addr, gotIPs)
 	}
 }
-func dns_writer(conn *net.UDPConn) {
+func dnsWriter(conn *net.UDPConn) {
 	msg := dnsmessage.Message{
-		Header: dnsmessage.Header{ID: 100, Response: false, OpCode: 0, Authoritative: true, RecursionDesired: true},
+		Header: dnsmessage.Header{
+			ID: 100, Response: false, OpCode: 0, RecursionDesired: true},
 		Questions: []dnsmessage.Question{
 			{
-				Name:  mustNewName("servernet.se."),
-				Type:  dnsmessage.TypeA,
+				Type:  dnsmessage.TypeSOA,
 				Class: dnsmessage.ClassINET,
-				//},
-				//{
-				//	Name:  mustNewName("hotmail.com."),
-				//	Type:  dnsmessage.TypeA,
-				//	Class: dnsmessage.ClassINET,
 			}}}
-	buf, err := msg.Pack()
-	fmt.Printf("DNS writer : %v\n", msg)
-	CheckError(err)
-	LocalAddr, err := net.ResolveUDPAddr("udp", "8.8.8.8:53")
-	CheckError(err)
-	_, err = conn.WriteToUDP(buf, LocalAddr)
-	if err != nil {
-		fmt.Println(msg, err)
+	msg.Questions[0].Name = mustNewName("google.com.")
+	scanner := bufio.NewScanner(os.Stdin)
+	var i uint16 = 0
+	for scanner.Scan() {
+		time.Sleep(time.Millisecond)
+		// `Text` returns the current token, here the next line,
+		// from the input.
+		i++
+		domain := scanner.Text()
+		//fmt.Printf("%s", domain)
+		msg.Header.ID = i % 65000
+		msg.Questions[0].Name = mustNewName(domain + ".")
+		buf, err := msg.Pack()
+		//fmt.Printf("DNS writer : %v %d %s\n", msg, len(buf), msg.Questions[0].Name)
+		checkError(err)
+		DNSServerAddr, err := net.ResolveUDPAddr("udp",  os.Getenv("DNS_REMOTE")+":53")
+		checkError(err)
+		_, err = conn.WriteToUDP(buf, DNSServerAddr)
+		if err != nil {
+			fmt.Println(msg, err)
+			time.Sleep(time.Second * 1)
+		}
 	}
+	fmt.Print("All Read : ")
+	fmt.Printf(time.Now().Format("15:04:05.000000000")+"\n")
 }
